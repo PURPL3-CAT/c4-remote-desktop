@@ -1,0 +1,6 @@
+node_modules/
+.venv/
+build/
+release/
+__pycache__/
+*.py[cod]

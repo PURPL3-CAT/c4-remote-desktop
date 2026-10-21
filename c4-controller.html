@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://0.peerjs.com wss://0.peerjs.com; media-src 'self' blob:; img-src 'self' data: blob:; font-src 'self'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>c4 Remote Controller</title>
+    <script src="./node_modules/peerjs/dist/peerjs.min.js" defer></script>
+    <script src="./c4-peer-recovery.js" defer></script>
+    <script src="./c4-auth-controller.js" defer></script>
+    <script src="./c4-controller-renderer.js" defer></script>
+    <style>
+        :root {
+            --bg: #050608; --panel: #101318; --accent: #00e0ff; --danger: #ff0077;
+            --text: #d8e8ff; --sub: #7a8a9a; --glow: rgba(0,224,255,0.4);
+        }
+        body { margin: 0; background: var(--bg); color: var(--text); font-family: monospace; overflow: hidden; }
+        #topbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel); }
+        input[type="text"], input[type="password"] {
+            padding: 6px 8px; background: #050608; border: 1px solid #222;
+            border-radius: 4px; color: var(--text); width: 230px; font-size: 13px;
+        }
+        input:focus { border-color: var(--accent); box-shadow: 0 0 6px var(--glow); outline: none; }
+        button { padding: 6px 10px; background: var(--accent); border: 0; border-radius: 4px; font-weight: 600; cursor: pointer; }
+        #release-btn { background: var(--danger); color: #fff; }
+        #status { color: var(--sub); font-size: 12px; margin-left: 8px; }
+        #canvas { width: 100vw; height: calc(100vh - 44px); display: block; background: #000; cursor: none; }
+        video { display: none; }
+    </style>
+</head>
+<body>
+    <div id="topbar">
+        <input id="device-id" type="text" placeholder="Device ID" autocomplete="off" aria-label="Device ID">
+        <input id="access-code" type="password" placeholder="Reusable access code" autocomplete="off" aria-label="Reusable access code">
+        <button id="connect-btn">Connect</button>
+        <button id="fullscreen-btn">Fullscreen</button>
+        <button id="release-btn">Release keys</button>
+        <div id="status">connecting to rendezvous service…</div>
+    </div>
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas" width="1280" height="720"></canvas>
+</body>
+</html>
