@@ -1,12 +1,25 @@
 let peer = null;
 let peerRecovery = null;
 let desktopStream = null;
+let captureSourceId = null;
 let dataConn = null;
 let activeCall = null;
+let activeVideoTrack = null;
+let activeAudioCall = null;
+let audioCaptureStream = null;
+let audioRequestId = 0;
+let sessionResolution = "1280x720";
+let remoteAudioEnabled = false;
+let resolutionUpdate = Promise.resolve();
 let authenticated = false;
 let remoteControlEnabled = true;
 let screenSharePending = false;
 let accessCodeHideTimer = null;
+const VIDEO_RESOLUTIONS = {
+    "1280x720": { width: 1280, height: 720 },
+    "960x540": { width: 960, height: 540 },
+    "640x360": { width: 640, height: 360 }
+};
 
 const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
@@ -63,6 +76,7 @@ function startFastPreview() {
 async function startScreenShare() {
     try {
         const source = await window.c4.getCaptureSource();
+        captureSourceId = source.id;
         desktopStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
             video: {
@@ -92,6 +106,7 @@ async function startScreenShare() {
         document.getElementById("disable-unattended-btn").hidden = false;
         setStatus("screen sharing active; ready for remote connection");
     } catch (error) {
+        captureSourceId = null;
         notifyScreenShareEnded();
         console.error("Screen sharing was not authorized:", error);
         setStatus(`Screen sharing failed: ${error.message}`);
@@ -101,6 +116,7 @@ async function startScreenShare() {
 function stopScreenShare() {
     const stream = desktopStream;
     desktopStream = null;
+    captureSourceId = null;
     if (stream) {
         stream.getTracks().forEach(track => track.stop());
     }
@@ -112,12 +128,189 @@ function stopScreenShare() {
     setStatus("screen sharing and remote control stopped");
 }
 
-function closeConnection() {
-    authenticated = false;
-    const call = activeCall;
-    activeCall = null;
+function stopRemoteAudio() {
+    audioRequestId += 1;
+    remoteAudioEnabled = false;
+    const call = activeAudioCall;
+    activeAudioCall = null;
     if (call) {
         call.close();
+    }
+    const stream = audioCaptureStream;
+    audioCaptureStream = null;
+    if (stream) {
+        stream.getTracks().forEach(track => track.stop());
+    }
+}
+
+async function setRemoteAudio(enabled, conn) {
+    remoteAudioEnabled = enabled;
+    if (!enabled) {
+        stopRemoteAudio();
+        return;
+    }
+    if (activeAudioCall || audioCaptureStream) {
+        return;
+    }
+
+    const requestId = ++audioRequestId;
+    let stream;
+    try {
+        if (!captureSourceId) {
+            throw new Error("Screen capture source is unavailable.");
+        }
+        stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+        if (requestId !== audioRequestId || dataConn !== conn || !authenticated) {
+            stream.getTracks().forEach(track => track.stop());
+            return;
+        }
+
+        const audioTracks = stream.getAudioTracks();
+        stream.getVideoTracks().forEach(track => track.stop());
+        if (audioTracks.length === 0) {
+            stream.getTracks().forEach(track => track.stop());
+            throw new Error("System audio capture is unavailable on this platform.");
+        }
+
+        audioCaptureStream = new MediaStream(audioTracks);
+        const call = peer.call(conn.peer, audioCaptureStream, { metadata: { kind: "audio" } });
+        if (!call) {
+            throw new Error("Audio connection could not be started.");
+        }
+        activeAudioCall = call;
+        call.on("close", () => {
+            if (activeAudioCall !== call) {
+                return;
+            }
+            activeAudioCall = null;
+            const currentStream = audioCaptureStream;
+            audioCaptureStream = null;
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
+            if (remoteAudioEnabled && dataConn === conn && conn.open) {
+                conn.send({ type: "audio-unavailable" });
+            }
+        });
+        call.on("error", error => {
+            console.error("Audio connection error:", error);
+            if (activeAudioCall === call) {
+                stopRemoteAudio();
+                if (dataConn === conn && conn.open) {
+                    conn.send({ type: "audio-unavailable" });
+                }
+            }
+        });
+    } catch (error) {
+        if (stream && audioCaptureStream !== stream) {
+            stream.getTracks().forEach(track => track.stop());
+        }
+        if (requestId === audioRequestId) {
+            stopRemoteAudio();
+            console.error("Could not start remote audio:", error);
+            if (dataConn === conn && conn.open) {
+                conn.send({ type: "audio-unavailable" });
+            }
+        }
+    }
+}
+
+async function startVideoCall(conn, resolutionName) {
+    sessionResolution = VIDEO_RESOLUTIONS[resolutionName] ? resolutionName : "1280x720";
+    const sourceTrack = desktopStream && desktopStream.getVideoTracks()[0];
+    if (!sourceTrack) {
+        throw new Error("Screen video track is unavailable.");
+    }
+
+    const videoTrack = sourceTrack.clone();
+    try {
+        let appliedResolution;
+        do {
+            appliedResolution = sessionResolution;
+            const resolution = VIDEO_RESOLUTIONS[appliedResolution];
+            await videoTrack.applyConstraints({
+                width: { max: resolution.width },
+                height: { max: resolution.height }
+            });
+        } while (appliedResolution !== sessionResolution);
+        if (dataConn !== conn || !authenticated) {
+            videoTrack.stop();
+            return;
+        }
+        const call = peer.call(conn.peer, new MediaStream([videoTrack]));
+        if (!call) {
+            videoTrack.stop();
+            throw new Error("Video connection could not be started.");
+        }
+        activeCall = call;
+        activeVideoTrack = videoTrack;
+        call.on("close", () => {
+            if (activeCall !== call) {
+                return;
+            }
+            activeCall = null;
+            activeVideoTrack = null;
+            videoTrack.stop();
+            if (dataConn === conn) {
+                closeConnection();
+            }
+        });
+        call.on("error", error => {
+            console.error("Video connection error:", error);
+            if (dataConn === conn) {
+                closeConnection();
+            }
+        });
+    } catch (error) {
+        videoTrack.stop();
+        throw error;
+    }
+}
+
+async function applyVideoResolution(resolutionName, conn) {
+    const resolution = VIDEO_RESOLUTIONS[resolutionName];
+    if (!resolution) {
+        conn.send({ type: "resolution-error" });
+        return;
+    }
+    sessionResolution = resolutionName;
+    if (!activeVideoTrack) {
+        return;
+    }
+    const track = activeVideoTrack;
+    const applyLatestResolution = async () => {
+        if (activeVideoTrack !== track) {
+            return;
+        }
+        const latestResolution = VIDEO_RESOLUTIONS[sessionResolution];
+        await track.applyConstraints({
+            width: { max: latestResolution.width },
+            height: { max: latestResolution.height }
+        });
+    };
+    resolutionUpdate = resolutionUpdate.then(applyLatestResolution, applyLatestResolution);
+    try {
+        await resolutionUpdate;
+    } catch (error) {
+        console.error("Could not apply requested video resolution:", error);
+        if (dataConn === conn && conn.open) {
+            conn.send({ type: "resolution-error" });
+        }
+    }
+}
+
+function closeConnection() {
+    authenticated = false;
+    stopRemoteAudio();
+    const call = activeCall;
+    activeCall = null;
+    const videoTrack = activeVideoTrack;
+    activeVideoTrack = null;
+    if (call) {
+        call.close();
+    }
+    if (videoTrack) {
+        videoTrack.stop();
     }
     const connection = dataConn;
     dataConn = null;
@@ -228,28 +421,31 @@ function initPeer(deviceId) {
                     }
 
                     if (message.type === "auth-complete" && authenticated) {
-                        const call = peer.call(conn.peer, desktopStream);
-                        if (!call) {
-                            closeConnection();
-                            setStatus("video connection could not be started");
+                        if (activeCall) {
                             return;
                         }
-                        activeCall = call;
-                        call.on("close", () => {
-                            if (activeCall !== call) {
-                                return;
-                            }
-                            activeCall = null;
-                            if (dataConn === conn) {
-                                closeConnection();
-                            }
-                        });
-                        call.on("error", error => {
-                            console.error("Video connection error:", error);
-                            if (dataConn === conn) {
-                                closeConnection();
-                            }
-                        });
+                        try {
+                            await startVideoCall(conn, message.resolution);
+                        } catch (error) {
+                            console.error("Could not start video stream:", error);
+                            conn.send({ type: "resolution-error" });
+                            closeConnection();
+                            return;
+                        }
+                        if (message.audio === true && dataConn === conn && authenticated) {
+                            await setRemoteAudio(true, conn);
+                        }
+                        return;
+                    }
+
+                    if (message.type === "audio-settings" && authenticated &&
+                        typeof message.enabled === "boolean") {
+                        await setRemoteAudio(message.enabled, conn);
+                        return;
+                    }
+
+                    if (message.type === "resolution-settings" && authenticated) {
+                        await applyVideoResolution(message.resolution, conn);
                         return;
                     }
 
@@ -283,9 +479,15 @@ function initPeer(deviceId) {
                         dataConn = null;
                         const call = activeCall;
                         activeCall = null;
+                        const videoTrack = activeVideoTrack;
+                        activeVideoTrack = null;
                         if (call) {
                             call.close();
                         }
+                        if (videoTrack) {
+                            videoTrack.stop();
+                        }
+                        stopRemoteAudio();
                         window.c4.endSession();
                         setStatus("controller disconnected");
                     }

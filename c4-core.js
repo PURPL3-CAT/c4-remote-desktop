@@ -12,6 +12,35 @@ let screenCaptureApproved = false;
 const authorizedRenderers = new Set();
 const inputRates = new Map();
 
+async function getConfiguredCaptureSource() {
+    const settings = credentials.getCaptureSettings();
+    if (!settings.unattendedCapture) {
+        throw new Error("Unattended screen sharing has not been enabled on this device.");
+    }
+    const sources = await desktopCapturer.getSources({
+        types: ["screen"],
+        thumbnailSize: { width: 1, height: 1 }
+    });
+    if (sources.length === 0) {
+        throw new Error("No capturable screen was found.");
+    }
+
+    let source = sources[0];
+    if (settings.displayId) {
+        if (settings.displayId.startsWith("id:")) {
+            source = sources.find(candidate => candidate.display_id === settings.displayId.slice(3));
+        } else if (settings.displayId.startsWith("name:")) {
+            source = sources.find(candidate => candidate.name === settings.displayId.slice(5));
+        } else {
+            throw new Error("Stored screen selection is invalid; re-enable unattended sharing locally.");
+        }
+    }
+    if (!source) {
+        throw new Error("The previously selected screen is unavailable; re-enable unattended sharing locally.");
+    }
+    return source;
+}
+
 function assertMainFrame(event) {
     if (!mainWindow ||
         event.sender !== mainWindow.webContents ||
@@ -171,30 +200,7 @@ function registerIpcHandlers() {
 
     ipcMain.handle("c4-get-capture-source", async event => {
         assertMainFrame(event);
-        const settings = credentials.getCaptureSettings();
-        if (!settings.unattendedCapture) {
-            throw new Error("Unattended screen sharing has not been enabled on this device.");
-        }
-        const sources = await desktopCapturer.getSources({
-            types: ["screen"],
-            thumbnailSize: { width: 1, height: 1 }
-        });
-        if (sources.length === 0) {
-            throw new Error("No capturable screen was found.");
-        }
-        let source = sources[0];
-        if (settings.displayId) {
-            if (settings.displayId.startsWith("id:")) {
-                source = sources.find(candidate => candidate.display_id === settings.displayId.slice(3));
-            } else if (settings.displayId.startsWith("name:")) {
-                source = sources.find(candidate => candidate.name === settings.displayId.slice(5));
-            } else {
-                throw new Error("Stored screen selection is invalid; re-enable unattended sharing locally.");
-            }
-        }
-        if (!source) {
-            throw new Error("The previously selected screen is unavailable; re-enable unattended sharing locally.");
-        }
+        const source = await getConfiguredCaptureSource();
         return { id: source.id };
     });
 
@@ -376,6 +382,29 @@ async function createWindow() {
 
     const win = mainWindow;
     const expectedUrl = pathToFileURL(path.join(__dirname, "c4-device.html")).href;
+    win.webContents.session.setDisplayMediaRequestHandler(async (request, callback) => {
+        if (!screenCaptureApproved ||
+            !request.videoRequested ||
+            !request.frame ||
+            request.frame !== win.webContents.mainFrame ||
+            request.frame.url.toLowerCase() !== expectedUrl.toLowerCase()) {
+            callback({});
+            return;
+        }
+
+        try {
+            const source = await getConfiguredCaptureSource();
+            callback({
+                video: source,
+                ...(request.audioRequested && process.platform === "win32"
+                    ? { audio: "loopback" }
+                    : {})
+            });
+        } catch (error) {
+            console.error("Could not authorize display-media capture:", error);
+            callback({});
+        }
+    }, { useSystemPicker: false });
     win.webContents.on("will-navigate", (event, url) => {
         if (url.toLowerCase() !== expectedUrl.toLowerCase()) {
             event.preventDefault();

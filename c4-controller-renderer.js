@@ -1,6 +1,7 @@
 let peer = null;
 let dataConn = null;
 let activeCall = null;
+let activeAudioCall = null;
 let authenticated = false;
 let authAttempted = false;
 let inputCaptureActive = false;
@@ -11,15 +12,86 @@ let inputQueue = Promise.resolve();
 let peerRecovery = null;
 
 const video = document.getElementById("video");
+const audio = document.getElementById("remote-audio");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const accessCodeEl = document.getElementById("access-code");
+const audioEnabledEl = document.getElementById("audio-enabled");
+const mouseSpeedEl = document.getElementById("mouse-speed");
+const mouseSpeedValueEl = document.getElementById("mouse-speed-value");
+const scrollSpeedEl = document.getElementById("scroll-speed");
+const scrollSpeedValueEl = document.getElementById("scroll-speed-value");
+const resolutionEl = document.getElementById("stream-resolution");
+
+const DEFAULT_SETTINGS = {
+    audio: false,
+    mouseSpeed: 1,
+    scrollMultiplier: 1,
+    resolution: "1280x720"
+};
+const RESOLUTIONS = new Set(["1280x720", "960x540", "640x360"]);
+let settings = { ...DEFAULT_SETTINGS };
 
 ctx.imageSmoothingEnabled = false;
 
 function setStatus(message) {
     statusEl.textContent = message;
+}
+
+function loadSettings() {
+    try {
+        const stored = JSON.parse(localStorage.getItem("c4-controller-settings") || "{}");
+        settings = {
+            audio: typeof stored.audio === "boolean" ? stored.audio : DEFAULT_SETTINGS.audio,
+            mouseSpeed: Number.isFinite(stored.mouseSpeed) && stored.mouseSpeed >= 0.25 && stored.mouseSpeed <= 3
+                ? stored.mouseSpeed
+                : DEFAULT_SETTINGS.mouseSpeed,
+            scrollMultiplier: Number.isFinite(stored.scrollMultiplier) &&
+                stored.scrollMultiplier >= 0.25 && stored.scrollMultiplier <= 3
+                ? stored.scrollMultiplier
+                : DEFAULT_SETTINGS.scrollMultiplier,
+            resolution: RESOLUTIONS.has(stored.resolution) ? stored.resolution : DEFAULT_SETTINGS.resolution
+        };
+    } catch (error) {
+        console.error("Could not load controller settings:", error);
+        settings = { ...DEFAULT_SETTINGS };
+    }
+    audioEnabledEl.checked = settings.audio;
+    mouseSpeedEl.value = String(settings.mouseSpeed);
+    mouseSpeedValueEl.value = `${settings.mouseSpeed}×`;
+    scrollSpeedEl.value = String(settings.scrollMultiplier);
+    scrollSpeedValueEl.value = `${settings.scrollMultiplier}×`;
+    resolutionEl.value = settings.resolution;
+    applyCanvasResolution();
+    audio.muted = !settings.audio;
+}
+
+function saveSettings() {
+    try {
+        localStorage.setItem("c4-controller-settings", JSON.stringify(settings));
+    } catch (error) {
+        console.error("Could not save controller settings:", error);
+        setStatus("settings could not be saved; changes apply until the app closes");
+    }
+}
+
+function applyCanvasResolution() {
+    const [width, height] = settings.resolution.split("x").map(Number);
+    canvas.width = width;
+    canvas.height = height;
+    ctx.imageSmoothingEnabled = false;
+}
+
+function sendRemoteSetting(message) {
+    if (!authenticated || !dataConn || !dataConn.open) {
+        return;
+    }
+    dataConn.send(message);
+}
+
+function scaleInputValue(value, multiplier) {
+    return Math.max(-10_000, Math.min(10_000, value * multiplier));
 }
 
 function sendInput(event) {
@@ -100,8 +172,8 @@ function setupInputCapture() {
         if (document.pointerLockElement === canvas) {
             sendInput({
                 kind: "mousemove",
-                dx: event.movementX,
-                dy: event.movementY,
+                dx: scaleInputValue(event.movementX, settings.mouseSpeed),
+                dy: scaleInputValue(event.movementY, settings.mouseSpeed),
                 relative: true
             });
         }
@@ -120,7 +192,11 @@ function setupInputCapture() {
 
     function onWheel(event) {
         event.preventDefault();
-        sendInput({ kind: "wheel", delta: event.deltaY, deltaMode: event.deltaMode });
+        sendInput({
+            kind: "wheel",
+            delta: scaleInputValue(event.deltaY, settings.scrollMultiplier),
+            deltaMode: event.deltaMode
+        });
     }
 
     function onCanvasClick() {
@@ -171,7 +247,14 @@ function closeConnection() {
     if (call) {
         call.close();
     }
+    const audioCall = activeAudioCall;
+    activeAudioCall = null;
+    if (audioCall) {
+        audioCall.close();
+    }
     video.srcObject = null;
+    audio.srcObject = null;
+    audio.muted = true;
     const connection = dataConn;
     dataConn = null;
     if (connection) {
@@ -211,6 +294,42 @@ function initPeer() {
                 setStatus("peer connection error");
             });
             currentPeer.on("call", call => {
+                if (call.metadata && call.metadata.kind === "audio") {
+                    if (!authenticated || !settings.audio || !dataConn || call.peer !== dataConn.peer ||
+                        activeAudioCall) {
+                        call.close();
+                        return;
+                    }
+                    activeAudioCall = call;
+                    call.answer();
+                    call.on("stream", stream => {
+                        if (activeAudioCall !== call || !authenticated || !settings.audio) {
+                            call.close();
+                            return;
+                        }
+                        audio.srcObject = stream;
+                        audio.muted = false;
+                        audio.play().catch(error => {
+                            console.error("Could not play remote audio:", error);
+                            setStatus("audio received; playback is blocked by the system");
+                        });
+                    });
+                    call.on("close", () => {
+                        if (activeAudioCall === call) {
+                            activeAudioCall = null;
+                            audio.srcObject = null;
+                        }
+                    });
+                    call.on("error", error => {
+                        console.error("Audio connection error:", error);
+                        if (activeAudioCall === call) {
+                            activeAudioCall = null;
+                            audio.srcObject = null;
+                            setStatus("audio connection failed");
+                        }
+                    });
+                    return;
+                }
                 if (!authenticated || !dataConn || call.peer !== dataConn.peer || activeCall) {
                     call.close();
                     return;
@@ -223,6 +342,7 @@ function initPeer() {
                         return;
                     }
                     video.srcObject = stream;
+                    video.muted = true;
                     startFastPreview();
                     setStatus("authenticated; streaming screen");
                 });
@@ -326,7 +446,11 @@ document.getElementById("connect-btn").addEventListener("click", () => {
             nextInputSequence = 0;
             inputQueue = Promise.resolve();
             setupInputCapture();
-            connection.send({ type: "auth-complete" });
+            connection.send({
+                type: "auth-complete",
+                audio: settings.audio,
+                resolution: settings.resolution
+            });
             setStatus("authenticated; waiting for screen stream");
             return;
         }
@@ -334,6 +458,16 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         if (message.type === "auth-failed") {
             setStatus("authentication failed");
             connection.close();
+            return;
+        }
+
+        if (message.type === "audio-unavailable") {
+            setStatus("audio capture is unavailable on the device");
+            return;
+        }
+
+        if (message.type === "resolution-error") {
+            setStatus("requested resolution could not be applied on the device");
         }
     });
 
@@ -355,7 +489,14 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         if (call) {
             call.close();
         }
+        const audioCall = activeAudioCall;
+        activeAudioCall = null;
+        if (audioCall) {
+            audioCall.close();
+        }
         video.srcObject = null;
+        audio.srcObject = null;
+        audio.muted = true;
         dataConn = null;
         setStatus("disconnected");
     });
@@ -366,6 +507,43 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         }
         setStatus("connection error");
     });
+});
+
+audioEnabledEl.addEventListener("change", () => {
+    settings.audio = audioEnabledEl.checked;
+    audio.muted = !settings.audio;
+    saveSettings();
+    if (!settings.audio) {
+        const call = activeAudioCall;
+        activeAudioCall = null;
+        if (call) {
+            call.close();
+        }
+        audio.srcObject = null;
+    }
+    sendRemoteSetting({ type: "audio-settings", enabled: settings.audio });
+});
+
+mouseSpeedEl.addEventListener("input", () => {
+    settings.mouseSpeed = Number(mouseSpeedEl.value);
+    mouseSpeedValueEl.value = `${settings.mouseSpeed}×`;
+    saveSettings();
+});
+
+scrollSpeedEl.addEventListener("input", () => {
+    settings.scrollMultiplier = Number(scrollSpeedEl.value);
+    scrollSpeedValueEl.value = `${settings.scrollMultiplier}×`;
+    saveSettings();
+});
+
+resolutionEl.addEventListener("change", () => {
+    settings.resolution = RESOLUTIONS.has(resolutionEl.value)
+        ? resolutionEl.value
+        : DEFAULT_SETTINGS.resolution;
+    resolutionEl.value = settings.resolution;
+    applyCanvasResolution();
+    saveSettings();
+    sendRemoteSetting({ type: "resolution-settings", resolution: settings.resolution });
 });
 
 document.getElementById("fullscreen-btn").addEventListener("click", () => {
@@ -395,5 +573,8 @@ document.getElementById("release-btn").addEventListener("click", () => {
 
 window.addEventListener("beforeunload", () => {
     closeConnection();
+    audio.srcObject = null;
     peerRecovery.stop();
 });
+
+loadSettings();
