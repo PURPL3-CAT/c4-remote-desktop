@@ -26,8 +26,8 @@
         #status { color: var(--sub); font-size: 12px; margin-left: 8px; }
         #canvas { width: 100vw; height: calc(100vh - 44px); display: block; background: #000; cursor: none; }
         video, audio { display: none; }
-        #settings-panel { position: absolute; top: 46px; right: 8px; z-index: 1; width: 250px; padding: 8px; background: var(--panel); border: 1px solid #222; border-radius: 4px; }
-        #settings-panel summary { cursor: pointer; font-weight: 600; }
+        #settings-panel { position: absolute; top: 48px; right: 8px; z-index: 1; width: 250px; padding: 12px; background: var(--panel); border: 1px solid #222; border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.6); }
+        #settings-panel[hidden] { display: none; }
         #settings-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 12px; }
         #settings-panel input[type="range"] { width: 120px; }
         #settings-panel select { padding: 4px; color: var(--text); background: #050608; border: 1px solid #222; border-radius: 4px; }
@@ -40,33 +40,36 @@
         <button id="connect-btn">Connect</button>
         <button id="fullscreen-btn">Fullscreen</button>
         <button id="release-btn">Release keys</button>
-        <details id="settings-panel">
-            <summary>Settings</summary>
-            <label for="audio-enabled">
-                <span>Receive audio</span>
-                <input id="audio-enabled" type="checkbox">
-            </label>
-            <label for="mouse-speed">
-                <span>Mouse speed</span>
-                <input id="mouse-speed" type="range" min="0.25" max="3" step="0.25" value="1">
-                <output id="mouse-speed-value" for="mouse-speed">1×</output>
-            </label>
-            <label for="scroll-speed">
-                <span>Scroll multiplier</span>
-                <input id="scroll-speed" type="range" min="0.25" max="3" step="0.25" value="1">
-                <output id="scroll-speed-value" for="scroll-speed">1×</output>
-            </label>
-            <label for="stream-resolution">
-                <span>Resolution</span>
-                <select id="stream-resolution">
-                    <option value="1280x720">1280 × 720</option>
-                    <option value="960x540">960 × 540</option>
-                    <option value="640x360">640 × 360</option>
-                </select>
-            </label>
-        </details>
+        <button id="settings-btn" type="button" aria-expanded="false" aria-controls="settings-panel">Settings</button>
         <div id="status">connecting to rendezvous service…</div>
     </div>
+    <section id="settings-panel" aria-label="Controller settings" hidden>
+        <label for="audio-enabled">
+            <span>Receive audio</span>
+            <input id="audio-enabled" type="checkbox">
+        </label>
+        <label for="mouse-speed">
+            <span>Mouse speed</span>
+            <input id="mouse-speed" type="range" min="0.25" max="3" step="0.25" value="1">
+            <output id="mouse-speed-value" for="mouse-speed">1×</output>
+        </label>
+        <label for="scroll-speed">
+            <span>Scroll multiplier</span>
+            <input id="scroll-speed" type="range" min="0.25" max="3" step="0.25" value="1">
+            <output id="scroll-speed-value" for="scroll-speed">1×</output>
+        </label>
+        <label for="stream-resolution">
+            <span>Resolution</span>
+            <select id="stream-resolution">
+                <option value="1280x720">1280 × 720</option>
+                <option value="960x540">960 × 540</option>
+                <option value="640x360">640 × 360</option>
+                <option value="1920x1080">1920 × 1080</option>
+                <option value="2560x1440">2560 × 1440</option>
+                <option value="3840x2160">3840 × 2160 (4K)</option>
+            </select>
+        </label>
+    </section>
     <video id="video" autoplay playsinline></video>
     <audio id="remote-audio" autoplay></audio>
     <canvas id="canvas" width="1280" height="720"></canvas>

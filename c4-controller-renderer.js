@@ -17,6 +17,8 @@ const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const statusEl = document.getElementById("status");
 const accessCodeEl = document.getElementById("access-code");
+const settingsButton = document.getElementById("settings-btn");
+const settingsPanel = document.getElementById("settings-panel");
 const audioEnabledEl = document.getElementById("audio-enabled");
 const mouseSpeedEl = document.getElementById("mouse-speed");
 const mouseSpeedValueEl = document.getElementById("mouse-speed-value");
@@ -30,7 +32,10 @@ const DEFAULT_SETTINGS = {
     scrollMultiplier: 1,
     resolution: "1280x720"
 };
-const RESOLUTIONS = new Set(["1280x720", "960x540", "640x360"]);
+const RESOLUTIONS = new Set([
+    "1280x720", "960x540", "640x360",
+    "1920x1080", "2560x1440", "3840x2160"
+]);
 let settings = { ...DEFAULT_SETTINGS };
 
 ctx.imageSmoothingEnabled = false;
@@ -38,6 +43,30 @@ ctx.imageSmoothingEnabled = false;
 function setStatus(message) {
     statusEl.textContent = message;
 }
+
+function setSettingsPanelOpen(open) {
+    settingsPanel.hidden = !open;
+    settingsButton.setAttribute("aria-expanded", String(open));
+}
+
+settingsButton.addEventListener("click", () => {
+    setSettingsPanelOpen(settingsPanel.hidden);
+});
+
+document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !settingsPanel.hidden) {
+        setSettingsPanelOpen(false);
+        settingsButton.focus();
+    }
+});
+
+document.addEventListener("pointerdown", event => {
+    if (!settingsPanel.hidden &&
+        !settingsPanel.contains(event.target) &&
+        !settingsButton.contains(event.target)) {
+        setSettingsPanelOpen(false);
+    }
+});
 
 function loadSettings() {
     try {

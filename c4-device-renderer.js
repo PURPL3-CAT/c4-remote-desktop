@@ -18,7 +18,10 @@ let accessCodeHideTimer = null;
 const VIDEO_RESOLUTIONS = {
     "1280x720": { width: 1280, height: 720 },
     "960x540": { width: 960, height: 540 },
-    "640x360": { width: 640, height: 360 }
+    "640x360": { width: 640, height: 360 },
+    "1920x1080": { width: 1920, height: 1080 },
+    "2560x1440": { width: 2560, height: 1440 },
+    "3840x2160": { width: 3840, height: 2160 }
 };
 
 const video = document.getElementById("video");
@@ -83,8 +86,8 @@ async function startScreenShare() {
                 mandatory: {
                     chromeMediaSource: "desktop",
                     chromeMediaSourceId: source.id,
-                    maxWidth: 1280,
-                    maxHeight: 720,
+                    maxWidth: 3840,
+                    maxHeight: 2160,
                     maxFrameRate: 30
                 }
             }
