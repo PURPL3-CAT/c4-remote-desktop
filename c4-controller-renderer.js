@@ -10,6 +10,7 @@ let sessionNonce = null;
 let nextInputSequence = 0;
 let inputQueue = Promise.resolve();
 let peerRecovery = null;
+let videoFrameTimeout = null;
 
 const video = document.getElementById("video");
 const audio = document.getElementById("remote-audio");
@@ -43,6 +44,22 @@ ctx.imageSmoothingEnabled = false;
 function setStatus(message) {
     statusEl.textContent = message;
 }
+
+video.addEventListener("loadeddata", () => {
+    if (video.srcObject) {
+        clearTimeout(videoFrameTimeout);
+        videoFrameTimeout = null;
+        setStatus(`streaming screen (${video.videoWidth}×${video.videoHeight})`);
+    }
+});
+
+video.addEventListener("error", () => {
+    if (video.srcObject && video.error) {
+        clearTimeout(videoFrameTimeout);
+        videoFrameTimeout = null;
+        setStatus(`video playback failed (media error ${video.error.code})`);
+    }
+});
 
 function setSettingsPanelOpen(open) {
     settingsPanel.hidden = !open;
@@ -268,6 +285,8 @@ function closeConnection() {
     sessionCode = null;
     sessionNonce = null;
     nextInputSequence = 0;
+    clearTimeout(videoFrameTimeout);
+    videoFrameTimeout = null;
     window.c4auth.clearKey();
     accessCodeEl.value = "";
     teardownInputCapture();
@@ -373,7 +392,26 @@ function initPeer() {
                     video.srcObject = stream;
                     video.muted = true;
                     startFastPreview();
-                    setStatus("authenticated; streaming screen");
+                    setStatus("video stream received; waiting for first frame…");
+                    clearTimeout(videoFrameTimeout);
+                    videoFrameTimeout = setTimeout(() => {
+                        if (video.srcObject !== stream || video.readyState >= 2) {
+                            return;
+                        }
+                        const trackStates = stream.getVideoTracks()
+                            .map(track => `${track.readyState}${track.muted ? ", muted" : ""}`)
+                            .join(", ") || "no video track";
+                        setStatus(`video stream has no decoded frames (${trackStates})`);
+                    }, 5_000);
+                    video.play().catch(error => {
+                        if (video.srcObject !== stream) {
+                            return;
+                        }
+                        clearTimeout(videoFrameTimeout);
+                        videoFrameTimeout = null;
+                        console.error("Could not play remote video:", error);
+                        setStatus(`video playback failed: ${error.message}`);
+                    });
                 });
                 call.on("close", () => {
                     if (activeCall === call) {
@@ -505,6 +543,8 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         if (dataConn !== connection) {
             return;
         }
+        clearTimeout(videoFrameTimeout);
+        videoFrameTimeout = null;
         authenticated = false;
         authAttempted = false;
         sessionCode = null;
