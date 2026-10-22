@@ -8,6 +8,7 @@
     <script src="./node_modules/peerjs/dist/peerjs.min.js" defer></script>
     <script src="./c4-peer-recovery.js" defer></script>
     <script src="./c4-auth-controller.js" defer></script>
+    <script src="./c4-controller-vault.js" defer></script>
     <script src="./c4-controller-renderer.js" defer></script>
     <style>
         :root {
@@ -32,6 +33,13 @@
         #settings-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; font-size: 12px; }
         #settings-panel input[type="range"] { width: 120px; }
         #settings-panel select { padding: 4px; color: var(--text); background: #050608; border: 1px solid #222; border-radius: 4px; }
+        #credential-vault { margin-top: 16px; padding-top: 12px; border-top: 1px solid #222; }
+        #credential-vault p { margin: 6px 0; color: var(--sub); font-size: 11px; line-height: 1.4; }
+        #credential-vault-pin { box-sizing: border-box; width: 100%; margin-top: 6px; }
+        #credential-vault-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        #credential-vault-actions button { font-size: 11px; }
+        #forget-credentials-btn { background: var(--danger); color: #fff; }
+        #credential-vault-status { min-height: 1em; }
     </style>
 </head>
 <body>
@@ -70,6 +78,18 @@
                 <option value="3840x2160">3840 × 2160 (4K)</option>
             </select>
         </label>
+        <section id="credential-vault" aria-label="Saved connection">
+            <strong>Saved connection</strong>
+            <p>Encrypted on this browser. Unlock once each time the page opens; use a long passphrase for better protection.</p>
+            <input id="credential-vault-pin" type="password" placeholder="PIN/passphrase (8+ characters)"
+                autocomplete="off" aria-label="Connection encryption PIN or passphrase">
+            <div id="credential-vault-actions">
+                <button id="save-credentials-btn" type="button">Save</button>
+                <button id="unlock-credentials-btn" type="button" hidden>Unlock</button>
+                <button id="forget-credentials-btn" type="button" hidden>Forget</button>
+            </div>
+            <p id="credential-vault-status" role="status" aria-live="polite"></p>
+        </section>
     </section>
     <video id="video" autoplay playsinline></video>
     <audio id="remote-audio" autoplay></audio>

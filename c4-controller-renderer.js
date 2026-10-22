@@ -26,6 +26,11 @@ const mouseSpeedValueEl = document.getElementById("mouse-speed-value");
 const scrollSpeedEl = document.getElementById("scroll-speed");
 const scrollSpeedValueEl = document.getElementById("scroll-speed-value");
 const resolutionEl = document.getElementById("stream-resolution");
+const vaultPinEl = document.getElementById("credential-vault-pin");
+const vaultStatusEl = document.getElementById("credential-vault-status");
+const unlockCredentialsButton = document.getElementById("unlock-credentials-btn");
+const forgetCredentialsButton = document.getElementById("forget-credentials-btn");
+const CREDENTIAL_VAULT_KEY = "c4-controller-credentials-v1";
 
 const DEFAULT_SETTINGS = {
     audio: false,
@@ -43,6 +48,80 @@ ctx.imageSmoothingEnabled = false;
 
 function setStatus(message) {
     statusEl.textContent = message;
+}
+
+function setVaultStatus(message) {
+    vaultStatusEl.textContent = message;
+}
+
+function updateCredentialVaultControls() {
+    try {
+        const hasSavedCredentials = localStorage.getItem(CREDENTIAL_VAULT_KEY) !== null;
+        unlockCredentialsButton.hidden = !hasSavedCredentials;
+        forgetCredentialsButton.hidden = !hasSavedCredentials;
+    } catch (error) {
+        unlockCredentialsButton.hidden = true;
+        forgetCredentialsButton.hidden = true;
+        setVaultStatus(`Saved connections are unavailable: ${error.message}`);
+    }
+}
+
+async function saveCredentials() {
+    const deviceId = document.getElementById("device-id").value.trim();
+    const accessCode = accessCodeEl.value.trim();
+    const pin = vaultPinEl.value;
+    vaultPinEl.value = "";
+    if (!deviceId || !accessCode) {
+        setVaultStatus("Enter a device ID and access code before saving.");
+        return;
+    }
+    try {
+        window.c4auth.decodeAccessCode(accessCode);
+        const encrypted = await window.c4ControllerVault.encrypt({ deviceId, accessCode }, pin);
+        localStorage.setItem(CREDENTIAL_VAULT_KEY, encrypted);
+        updateCredentialVaultControls();
+        setVaultStatus("Connection saved encrypted. Unlock it with this PIN/passphrase next time.");
+    } catch (error) {
+        console.error("Could not save encrypted connection:", error);
+        setVaultStatus(error.message);
+    }
+}
+
+async function unlockCredentials() {
+    const pin = vaultPinEl.value;
+    vaultPinEl.value = "";
+    try {
+        const encrypted = localStorage.getItem(CREDENTIAL_VAULT_KEY);
+        if (encrypted === null) {
+            updateCredentialVaultControls();
+            setVaultStatus("No saved connection was found in this browser.");
+            return;
+        }
+        const credentials = await window.c4ControllerVault.decrypt(encrypted, pin);
+        window.c4auth.decodeAccessCode(credentials.accessCode);
+        document.getElementById("device-id").value = credentials.deviceId;
+        accessCodeEl.value = credentials.accessCode;
+        setVaultStatus("Connection unlocked. Press Connect when ready.");
+    } catch (error) {
+        console.error("Could not unlock saved connection:", error);
+        setVaultStatus(error.message);
+    }
+}
+
+function forgetCredentials() {
+    if (!window.confirm("Forget the encrypted saved connection on this browser?")) {
+        return;
+    }
+    try {
+        localStorage.removeItem(CREDENTIAL_VAULT_KEY);
+        document.getElementById("device-id").value = "";
+        accessCodeEl.value = "";
+        updateCredentialVaultControls();
+        setVaultStatus("Saved connection forgotten.");
+    } catch (error) {
+        console.error("Could not forget saved connection:", error);
+        setVaultStatus(`Could not forget saved connection: ${error.message}`);
+    }
 }
 
 video.addEventListener("loadeddata", () => {
@@ -69,6 +148,10 @@ function setSettingsPanelOpen(open) {
 settingsButton.addEventListener("click", () => {
     setSettingsPanelOpen(settingsPanel.hidden);
 });
+
+document.getElementById("save-credentials-btn").addEventListener("click", saveCredentials);
+unlockCredentialsButton.addEventListener("click", unlockCredentials);
+forgetCredentialsButton.addEventListener("click", forgetCredentials);
 
 document.addEventListener("keydown", event => {
     if (event.key === "Escape" && !settingsPanel.hidden) {
@@ -647,3 +730,4 @@ window.addEventListener("beforeunload", () => {
 });
 
 loadSettings();
+updateCredentialVaultControls();
