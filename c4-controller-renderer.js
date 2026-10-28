@@ -11,6 +11,10 @@ let nextInputSequence = 0;
 let inputQueue = Promise.resolve();
 let peerRecovery = null;
 let videoFrameTimeout = null;
+let debugStatsTimer = null;
+let debugStatsPending = false;
+let previousInboundStats = null;
+let remoteVideoStats = null;
 
 const video = document.getElementById("video");
 const audio = document.getElementById("remote-audio");
@@ -20,6 +24,8 @@ const statusEl = document.getElementById("status");
 const accessCodeEl = document.getElementById("access-code");
 const settingsButton = document.getElementById("settings-btn");
 const settingsPanel = document.getElementById("settings-panel");
+const debugButton = document.getElementById("debug-btn");
+const debugPanel = document.getElementById("debug-panel");
 const audioEnabledEl = document.getElementById("audio-enabled");
 const mouseSpeedEl = document.getElementById("mouse-speed");
 const mouseSpeedValueEl = document.getElementById("mouse-speed-value");
@@ -143,10 +149,31 @@ video.addEventListener("error", () => {
 function setSettingsPanelOpen(open) {
     settingsPanel.hidden = !open;
     settingsButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+        setDebugPanelOpen(false);
+    }
+}
+
+function setDebugPanelOpen(open) {
+    debugPanel.hidden = !open;
+    debugButton.setAttribute("aria-expanded", String(open));
+    if (open) {
+        setSettingsPanelOpen(false);
+        updateDebugStats();
+        clearInterval(debugStatsTimer);
+        debugStatsTimer = setInterval(updateDebugStats, 1000);
+    } else {
+        clearInterval(debugStatsTimer);
+        debugStatsTimer = null;
+    }
 }
 
 settingsButton.addEventListener("click", () => {
     setSettingsPanelOpen(settingsPanel.hidden);
+});
+
+debugButton.addEventListener("click", () => {
+    setDebugPanelOpen(debugPanel.hidden);
 });
 
 document.getElementById("save-credentials-btn").addEventListener("click", saveCredentials);
@@ -154,19 +181,182 @@ unlockCredentialsButton.addEventListener("click", unlockCredentials);
 forgetCredentialsButton.addEventListener("click", forgetCredentials);
 
 document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && !settingsPanel.hidden) {
-        setSettingsPanelOpen(false);
-        settingsButton.focus();
+    if (event.key === "Escape" && (!settingsPanel.hidden || !debugPanel.hidden)) {
+        if (!settingsPanel.hidden) {
+            setSettingsPanelOpen(false);
+            settingsButton.focus();
+        } else {
+            setDebugPanelOpen(false);
+            debugButton.focus();
+        }
     }
 });
 
 document.addEventListener("pointerdown", event => {
-    if (!settingsPanel.hidden &&
-        !settingsPanel.contains(event.target) &&
+    if (!settingsPanel.hidden && !settingsPanel.contains(event.target) &&
         !settingsButton.contains(event.target)) {
         setSettingsPanelOpen(false);
     }
+    if (!debugPanel.hidden && !debugPanel.contains(event.target) && !debugButton.contains(event.target)) {
+        setDebugPanelOpen(false);
+    }
 });
+
+function setDebugValue(id, value) {
+    document.getElementById(id).textContent = value;
+}
+
+function updateRemoteVideoStats() {
+    if (!remoteVideoStats) {
+        setDebugValue("debug-send-bitrate", "—");
+        setDebugValue("debug-encode", "—");
+        setDebugValue("debug-encoded-fps", "—");
+        return;
+    }
+    setDebugValue("debug-encoded-fps", Number.isFinite(remoteVideoStats.fps)
+        ? `${remoteVideoStats.fps.toFixed(1)} fps`
+        : "—");
+    setDebugValue("debug-send-bitrate", Number.isFinite(remoteVideoStats.sendKbps)
+        ? `${remoteVideoStats.sendKbps.toFixed(0)} kbps`
+        : "—");
+    setDebugValue("debug-encode", Number.isFinite(remoteVideoStats.encodeMs)
+        ? `${remoteVideoStats.encodeMs.toFixed(1)} ms`
+        : "—");
+}
+
+async function updateDebugStats() {
+    if (debugStatsPending) {
+        return;
+    }
+    setDebugValue("debug-connection", authenticated ? "Connected" : dataConn ? "Connecting" : "Disconnected");
+    setDebugValue("debug-resolution", settings.resolution.replace("x", " × "));
+    updateRemoteVideoStats();
+
+    const connection = activeCall && activeCall.peerConnection;
+    if (!connection || !authenticated) {
+        setDebugValue("debug-codec", "—");
+        setDebugValue("debug-route", "—");
+        setDebugValue("debug-rtt", "—");
+        setDebugValue("debug-available-bandwidth", "—");
+        setDebugValue("debug-jitter", "—");
+        setDebugValue("debug-jitter-buffer", "—");
+        setDebugValue("debug-loss", "—");
+        setDebugValue("debug-receive-bitrate", "—");
+        setDebugValue("debug-fps", "—");
+        setDebugValue("debug-decode", "—");
+        setDebugValue("debug-rendered-resolution", "—");
+        document.getElementById("debug-panel-status").textContent =
+            authenticated ? "Waiting for video statistics." : "No active video connection.";
+        previousInboundStats = null;
+        return;
+    }
+
+    debugStatsPending = true;
+    try {
+        const stats = await connection.getStats();
+        const entries = [];
+        stats.forEach(report => entries.push(report));
+        const inbound = entries.filter(report =>
+            report.type === "inbound-rtp" &&
+            (report.kind === "video" || report.mediaType === "video") &&
+            !report.isRemote
+        );
+        const transport = entries.find(report => report.type === "transport" && report.selectedCandidatePairId);
+        const pair = transport
+            ? entries.find(report => report.id === transport.selectedCandidatePairId)
+            : entries.find(report => report.type === "candidate-pair" &&
+                (report.selected || (report.nominated && report.state === "succeeded")));
+        const codec = inbound.length && inbound[0].codecId
+            ? entries.find(report => report.id === inbound[0].codecId)
+            : null;
+        const localCandidate = pair && entries.find(report => report.id === pair.localCandidateId);
+        const remoteCandidate = pair && entries.find(report => report.id === pair.remoteCandidateId);
+        const now = performance.now();
+        let frameCount = 0;
+        let decodeTime = 0;
+        let bytesReceived = 0;
+        let packetsReceived = 0;
+        let packetsLost = 0;
+        let jitter = 0;
+        let jitterStreams = 0;
+        let jitterBufferDelay = 0;
+        let jitterBufferEmitted = 0;
+        for (const report of inbound) {
+            frameCount += Number.isFinite(report.framesDecoded) ? report.framesDecoded : 0;
+            decodeTime += Number.isFinite(report.totalDecodeTime) ? report.totalDecodeTime : 0;
+            bytesReceived += Number.isFinite(report.bytesReceived) ? report.bytesReceived : 0;
+            packetsReceived += Number.isFinite(report.packetsReceived) ? report.packetsReceived : 0;
+            packetsLost += Number.isFinite(report.packetsLost) ? report.packetsLost : 0;
+            if (Number.isFinite(report.jitter)) {
+                jitter += report.jitter;
+                jitterStreams += 1;
+            }
+            jitterBufferDelay += Number.isFinite(report.jitterBufferDelay) ? report.jitterBufferDelay : 0;
+            jitterBufferEmitted += Number.isFinite(report.jitterBufferEmittedCount)
+                ? report.jitterBufferEmittedCount
+                : 0;
+        }
+
+        const elapsedSeconds = previousInboundStats ? (now - previousInboundStats.timestamp) / 1000 : 0;
+        if (previousInboundStats && elapsedSeconds > 0) {
+            const framesDelta = frameCount - previousInboundStats.frames;
+            const decodeDelta = decodeTime - previousInboundStats.decodeTime;
+            const bytesDelta = bytesReceived - previousInboundStats.bytes;
+            const jitterBufferDelta = jitterBufferDelay - previousInboundStats.jitterBufferDelay;
+            const jitterBufferFramesDelta = jitterBufferEmitted - previousInboundStats.jitterBufferEmitted;
+            setDebugValue("debug-fps", `${Math.max(0, framesDelta / elapsedSeconds).toFixed(1)} fps`);
+            setDebugValue("debug-decode", framesDelta > 0 && decodeDelta >= 0
+                ? `${(decodeDelta * 1000 / framesDelta).toFixed(1)} ms`
+                : "—");
+            setDebugValue("debug-receive-bitrate", bytesDelta >= 0
+                ? `${(bytesDelta * 8 / elapsedSeconds / 1000).toFixed(0)} kbps`
+                : "—");
+            setDebugValue("debug-jitter-buffer", jitterBufferFramesDelta > 0 && jitterBufferDelta >= 0
+                ? `${(jitterBufferDelta * 1000 / jitterBufferFramesDelta).toFixed(1)} ms`
+                : "—");
+        }
+        previousInboundStats = {
+            timestamp: now,
+            frames: frameCount,
+            decodeTime,
+            bytes: bytesReceived,
+            jitterBufferDelay,
+            jitterBufferEmitted
+        };
+        setDebugValue("debug-jitter", jitterStreams ? `${(jitter / jitterStreams * 1000).toFixed(1)} ms` : "—");
+        setDebugValue("debug-codec", codec && codec.mimeType ? codec.mimeType : "—");
+        setDebugValue("debug-route", localCandidate && remoteCandidate
+            ? `${localCandidate.candidateType} → ${remoteCandidate.candidateType}` +
+                (localCandidate.protocol ? ` (${localCandidate.protocol})` : "")
+            : "—");
+        const availableBandwidth = pair && (
+            Number.isFinite(pair.availableIncomingBitrate)
+                ? pair.availableIncomingBitrate
+                : pair.availableOutgoingBitrate
+        );
+        setDebugValue("debug-available-bandwidth", Number.isFinite(availableBandwidth)
+            ? `${(availableBandwidth / 1000).toFixed(0)} kbps`
+            : "—");
+        const totalPackets = packetsReceived + Math.max(0, packetsLost);
+        setDebugValue("debug-loss", totalPackets > 0
+            ? `${(Math.max(0, packetsLost) * 100 / totalPackets).toFixed(2)}%`
+            : "—");
+        setDebugValue("debug-rtt", pair && Number.isFinite(pair.currentRoundTripTime)
+            ? `${(pair.currentRoundTripTime * 1000).toFixed(0)} ms`
+            : "—");
+        setDebugValue("debug-rendered-resolution", video.videoWidth && video.videoHeight
+            ? `${video.videoWidth} × ${video.videoHeight}`
+            : "—");
+        document.getElementById("debug-panel-status").textContent = inbound.length
+            ? "Live WebRTC statistics; values refresh once per second."
+            : "Connected; waiting for inbound video statistics.";
+    } catch (error) {
+        console.error("Could not read WebRTC diagnostics:", error);
+        document.getElementById("debug-panel-status").textContent = "WebRTC statistics are unavailable.";
+    } finally {
+        debugStatsPending = false;
+    }
+}
 
 function loadSettings() {
     try {
@@ -373,6 +563,9 @@ function closeConnection() {
     window.c4auth.clearKey();
     accessCodeEl.value = "";
     teardownInputCapture();
+    remoteVideoStats = null;
+    previousInboundStats = null;
+    updateRemoteVideoStats();
     const call = activeCall;
     activeCall = null;
     if (call) {
@@ -562,6 +755,18 @@ document.getElementById("connect-btn").addEventListener("click", () => {
             return;
         }
 
+        if (message.type === "network-stats" && authenticated && message.stats &&
+            typeof message.stats === "object") {
+            const stats = message.stats;
+            remoteVideoStats = {
+                fps: Number.isFinite(stats.fps) ? stats.fps : null,
+                encodeMs: Number.isFinite(stats.encodeMs) ? stats.encodeMs : null,
+                sendKbps: Number.isFinite(stats.sendKbps) ? stats.sendKbps : null
+            };
+            updateRemoteVideoStats();
+            return;
+        }
+
         if (message.type === "auth-challenge" && !authAttempted) {
             authAttempted = true;
             try {
@@ -636,6 +841,9 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         window.c4auth.clearKey();
         accessCodeEl.value = "";
         teardownInputCapture();
+        remoteVideoStats = null;
+        previousInboundStats = null;
+        updateRemoteVideoStats();
         const call = activeCall;
         activeCall = null;
         if (call) {

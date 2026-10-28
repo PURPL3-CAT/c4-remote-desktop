@@ -5,6 +5,9 @@ let captureSourceId = null;
 let dataConn = null;
 let activeCall = null;
 let activeVideoTrack = null;
+let videoStatsTimer = null;
+let previousOutboundStats = null;
+let videoStatsPending = false;
 let activeAudioCall = null;
 let audioCaptureStream = null;
 let audioRequestId = 0;
@@ -36,6 +39,69 @@ ctx.imageSmoothingEnabled = false;
 
 function setStatus(message) {
     statusEl.textContent = message;
+}
+
+function stopVideoStats() {
+    clearInterval(videoStatsTimer);
+    videoStatsTimer = null;
+    previousOutboundStats = null;
+    videoStatsPending = false;
+}
+
+function startVideoStats(call, conn, track) {
+    stopVideoStats();
+    videoStatsTimer = setInterval(async () => {
+        if (videoStatsPending || activeCall !== call || dataConn !== conn || !authenticated) {
+            return;
+        }
+        const peerConnection = call.peerConnection;
+        if (!peerConnection || !conn.open) {
+            return;
+        }
+        videoStatsPending = true;
+        try {
+            const stats = await peerConnection.getStats();
+            if (activeCall !== call || dataConn !== conn || !authenticated || !conn.open) {
+                return;
+            }
+            const reports = [];
+            stats.forEach(report => reports.push(report));
+            const outbound = reports.filter(report =>
+                report.type === "outbound-rtp" &&
+                (report.kind === "video" || report.mediaType === "video") &&
+                !report.isRemote
+            );
+            let framesEncoded = 0;
+            let totalEncodeTime = 0;
+            let bytesSent = 0;
+            for (const report of outbound) {
+                framesEncoded += Number.isFinite(report.framesEncoded) ? report.framesEncoded : 0;
+                totalEncodeTime += Number.isFinite(report.totalEncodeTime) ? report.totalEncodeTime : 0;
+                bytesSent += Number.isFinite(report.bytesSent) ? report.bytesSent : 0;
+            }
+            const now = performance.now();
+            const elapsedSeconds = previousOutboundStats ? (now - previousOutboundStats.timestamp) / 1000 : 0;
+            const framesDelta = previousOutboundStats ? framesEncoded - previousOutboundStats.frames : 0;
+            const encodeDelta = previousOutboundStats ? totalEncodeTime - previousOutboundStats.encodeTime : 0;
+            const bytesDelta = previousOutboundStats ? bytesSent - previousOutboundStats.bytes : 0;
+            const trackSettings = track.getSettings();
+            conn.send({
+                type: "network-stats",
+                stats: {
+                    fps: elapsedSeconds > 0 && framesDelta >= 0 ? framesDelta / elapsedSeconds : null,
+                    encodeMs: framesDelta > 0 && encodeDelta >= 0 ? encodeDelta * 1000 / framesDelta : null,
+                    sendKbps: elapsedSeconds > 0 && bytesDelta >= 0 ? bytesDelta * 8 / elapsedSeconds / 1000 : null,
+                    width: Number.isFinite(trackSettings.width) ? trackSettings.width : null,
+                    height: Number.isFinite(trackSettings.height) ? trackSettings.height : null
+                }
+            });
+            previousOutboundStats = { timestamp: now, frames: framesEncoded, encodeTime: totalEncodeTime, bytes: bytesSent };
+        } catch (error) {
+            console.error("Could not read video sender statistics:", error);
+        } finally {
+            videoStatsPending = false;
+        }
+    }, 1000);
 }
 
 function hideAccessCode() {
@@ -247,10 +313,12 @@ async function startVideoCall(conn, resolutionName) {
         }
         activeCall = call;
         activeVideoTrack = videoTrack;
+        startVideoStats(call, conn, videoTrack);
         call.on("close", () => {
             if (activeCall !== call) {
                 return;
             }
+            stopVideoStats();
             activeCall = null;
             activeVideoTrack = null;
             videoTrack.stop();
@@ -305,6 +373,7 @@ async function applyVideoResolution(resolutionName, conn) {
 function closeConnection() {
     authenticated = false;
     stopRemoteAudio();
+    stopVideoStats();
     const call = activeCall;
     activeCall = null;
     const videoTrack = activeVideoTrack;
@@ -480,6 +549,7 @@ function initPeer(deviceId) {
                     if (dataConn === conn) {
                         authenticated = false;
                         dataConn = null;
+                        stopVideoStats();
                         const call = activeCall;
                         activeCall = null;
                         const videoTrack = activeVideoTrack;
