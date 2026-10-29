@@ -154,7 +154,7 @@ async function startScreenShare() {
                     chromeMediaSourceId: source.id,
                     maxWidth: 3840,
                     maxHeight: 2160,
-                    maxFrameRate: 30
+                    maxFrameRate: 60
                 }
             }
         });
