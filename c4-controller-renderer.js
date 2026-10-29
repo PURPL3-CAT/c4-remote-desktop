@@ -1,5 +1,6 @@
 let peer = null;
 let dataConn = null;
+let inputConn = null;
 let activeCall = null;
 let activeAudioCall = null;
 let authenticated = false;
@@ -15,6 +16,14 @@ let debugStatsTimer = null;
 let debugStatsPending = false;
 let previousInboundStats = null;
 let remoteVideoStats = null;
+let testModeActive = false;
+let testModeStartTime = 0;
+let testModeTimer = null;
+let testModePingCount = 0;
+let testModePingSum = 0;
+let testModePingMax = 0;
+let testModePingMin = Infinity;
+let testModeResults = [];
 
 const video = document.getElementById("video");
 const audio = document.getElementById("remote-audio");
@@ -26,6 +35,7 @@ const settingsButton = document.getElementById("settings-btn");
 const settingsPanel = document.getElementById("settings-panel");
 const debugButton = document.getElementById("debug-btn");
 const debugPanel = document.getElementById("debug-panel");
+const testModeButton = document.getElementById("test-mode-btn");
 const audioEnabledEl = document.getElementById("audio-enabled");
 const mouseSpeedEl = document.getElementById("mouse-speed");
 const mouseSpeedValueEl = document.getElementById("mouse-speed-value");
@@ -173,6 +183,83 @@ settingsButton.addEventListener("click", () => {
 });
 
 debugButton.addEventListener("click", () => {
+debugButton.addEventListener("click", () => {
+    setDebugPanelOpen(debugPanel.hidden);
+});
+
+testModeButton.addEventListener("click", async () => {
+    if (testModeActive) {
+        if (testModeTimer) {
+            clearInterval(testModeTimer);
+            testModeTimer = null;
+        }
+        if (dataConn && dataConn.open) {
+            dataConn.send({ type: "test-mode-end" });
+        }
+        if (inputConn && inputConn.open) {
+            inputConn.send({ type: "test-mode-end" });
+        }
+        setStatus("lag test stopped");
+        return;
+    }
+
+    testModeActive = true;
+    testModeStartTime = Date.now();
+    testModePingCount = 0;
+    testModePingSum = 0;
+    testModePingMax = 0;
+    testModePingMin = Infinity;
+    testModeResults = [];
+
+    const startResponse = await window.c4.startLagTest();
+    if (!startResponse) {
+        testModeActive = false;
+        setStatus("lag test could not start");
+        return;
+    }
+
+    setStatus("running 30s lag test…");
+    testModeTimer = setInterval(() => {
+        if (!authenticated || !dataConn || !dataConn.open) {
+            return;
+        }
+        testModePingCount += 1;
+        const pingStart = performance.now();
+        const pingId = testModePingCount;
+        const ping = { type: "test-ping", id: pingId, timestamp: Date.now() };
+        dataConn.send(ping);
+        const timeout = setTimeout(() => {
+            testModePingSum += 1000;
+            testModePingMax = Math.max(testModePingMax, 1000);
+            testModePingMin = Math.min(testModePingMin, 1000);
+        }, 1000);
+        window.c4.onTestPong(pingId, pongTimestamp => {
+            clearTimeout(timeout);
+            const rttMs = (performance.now() - pingStart) * 1000 / 2;
+            testModePingSum += rttMs;
+            testModePingMax = Math.max(testModePingMax, rttMs);
+            testModePingMin = Math.min(testModePingMin, rttMs);
+        });
+    }, 500);
+
+    setTimeout(async () => {
+        if (testModeTimer) {
+            clearInterval(testModeTimer);
+            testModeTimer = null;
+        }
+        const durationMs = await window.c4.stopLagTest();
+        const results = await window.c4.getLagTestResults();
+        testModeResults = results;
+        setStatus(`lag test complete: ${durationMs}ms duration, ${results.count} pings, avg ${results.avg.toFixed(2)}ms, min ${results.min.toFixed(2)}ms, max ${results.max.toFixed(2)}ms`);
+
+        if (dataConn && dataConn.open) {
+            dataConn.send({ type: "test-mode-end" });
+        }
+        if (inputConn && inputConn.open) {
+            inputConn.send({ type: "test-mode-end" });
+        }
+    }, 30_000);
+});
     setDebugPanelOpen(debugPanel.hidden);
 });
 
@@ -414,24 +501,25 @@ function scaleInputValue(value, multiplier) {
 }
 
 function sendInput(event) {
-    if (authenticated && dataConn && dataConn.open) {
-        const connection = dataConn;
-        const code = sessionCode;
-        const nonce = sessionNonce;
-        const sequence = ++nextInputSequence;
-        inputQueue = inputQueue.then(async () => {
-            const proof = await window.c4auth.createInputProof(code, nonce, sequence, event);
-            if (authenticated && dataConn === connection && connection.open) {
-                connection.send({ type: "input", nonce, sequence, event, proof });
-            }
-        }).catch(error => {
-            console.error("Could not authenticate input:", error);
-            if (dataConn === connection) {
-                closeConnection();
-                setStatus("input authentication failed");
-            }
-        });
+    const connection = inputConn || dataConn;
+    if (!authenticated || !connection || !connection.open) {
+        return;
     }
+    const code = sessionCode;
+    const nonce = sessionNonce;
+    const sequence = ++nextInputSequence;
+    inputQueue = inputQueue.then(async () => {
+        const proof = await window.c4auth.createInputProof(code, nonce, sequence, event);
+        if (authenticated && (inputConn || dataConn) === connection && connection.open) {
+            connection.send({ type: "input", nonce, sequence, event, proof });
+        }
+    }).catch(error => {
+        console.error("Could not authenticate input:", error);
+        if (dataConn === connection) {
+            closeConnection();
+            setStatus("input authentication failed");
+        }
+    });
 }
 
 function startFastPreview() {
@@ -744,6 +832,13 @@ document.getElementById("connect-btn").addEventListener("click", () => {
         return;
     }
     dataConn = connection;
+
+    // Open a second unreliable/unordered channel for high-frequency input
+    // This prevents head-of-line blocking on the reliable control channel
+    const inputChannel = peer.connect(targetId, { reliable: false, label: "c4-input" });
+    if (inputChannel) {
+        inputConn = inputChannel;
+    }
 
     connection.on("open", () => {
         if (dataConn === connection) {

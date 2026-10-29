@@ -11,6 +11,9 @@ let shutdownInProgress = false;
 let screenCaptureApproved = false;
 const authorizedRenderers = new Set();
 const inputRates = new Map();
+let testModeActive = false;
+let testModeStartTime = 0;
+const testModeLogPath = path.join(__dirname, "c4-lag-test.log");
 
 async function getConfiguredCaptureSource() {
     const settings = credentials.getCaptureSettings();
@@ -334,6 +337,42 @@ function registerIpcHandlers() {
                 reject(new Error(`Could not start the input bridge: ${error.message}`));
             });
         });
+    });
+
+    ipcMain.handle("c4-test-mode-start", event => {
+        assertMainFrame(event);
+        testModeActive = true;
+        testModeStartTime = Date.now();
+        const logEntry = `=== Lag Test Started: ${new Date(testModeStartTime).toISOString()} ===\n`;
+        fs.appendFileSync(testModeLogPath, logEntry);
+        return true;
+    });
+
+    ipcMain.handle("c4-test-mode-ping", event => {
+        assertMainFrame(event);
+        if (!testModeActive) {
+            return false;
+        }
+        const entry = `${Date.now() - testModeStartTime},ping\n`;
+        fs.appendFileSync(testModeLogPath, entry);
+        return true;
+    });
+
+    ipcMain.handle("c4-test-mode-stop", event => {
+        assertMainFrame(event);
+        const endTime = Date.now();
+        testModeActive = false;
+        const durationMs = endTime - testModeStartTime;
+        const logEntry = `=== Lag Test Ended: ${new Date(endTime).toISOString()} (duration ${durationMs} ms) ===\n\n`;
+        fs.appendFileSync(testModeLogPath, logEntry);
+        return durationMs;
+    });
+
+    ipcMain.on("c4-test-pong", (event, pong) => {
+        if (!mainWindow || event.sender !== mainWindow.webContents) {
+            return;
+        }
+        mainWindow.webContents.send("c4-test-pong", pong);
     });
 
     ipcMain.handle("c4-send-input", (event, envelope) => {

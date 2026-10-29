@@ -443,6 +443,8 @@ function initPeer(deviceId) {
                         conn.close();
                     }
                 }, 30_000);
+                let inputConnAccepted = false;
+
                 conn.on("open", async () => {
                     if (!desktopStream || desktopStream.getVideoTracks().every(track => track.readyState !== "live")) {
                         setStatus("connection rejected because screen sharing is not active");
@@ -461,7 +463,7 @@ function initPeer(deviceId) {
                 });
 
                 conn.on("data", async message => {
-                    if (dataConn !== conn || !message || typeof message !== "object") {
+                    if (dataConn !== conn && !inputConnAccepted && conn !== inputConn) {
                         return;
                     }
 
@@ -541,6 +543,15 @@ function initPeer(deviceId) {
 
                     if (message.type === "session-end" && authenticated) {
                         closeConnection();
+                    }
+
+                    if (message.type === "test-ping" && authenticated) {
+                        conn.send({ type: "test-pong", id: message.id, timestamp: Date.now() });
+                        return;
+                    }
+
+                    if (message.type === "test-mode-end" && authenticated) {
+                        return;
                     }
                 });
 

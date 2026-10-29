@@ -50,5 +50,41 @@ contextBridge.exposeInMainWorld("c4", {
         const listener = () => callback();
         ipcRenderer.on("c4-access-code-rotated", listener);
         return () => ipcRenderer.removeListener("c4-access-code-rotated", listener);
+    },
+    startLagTest() {
+        return ipcRenderer.invoke("c4-test-mode-start");
+    },
+    sendTestPing() {
+        return ipcRenderer.invoke("c4-test-mode-ping");
+    },
+    stopLagTest() {
+        return ipcRenderer.invoke("c4-test-mode-stop");
+    },
+    getLagTestResults() {
+        const logPath = require("path").join(__dirname, "c4-lag-test.log");
+        try {
+            const fs = require("fs");
+            const content = fs.readFileSync(logPath, "utf8");
+            const lines = content.trim().split("\n").filter(line => line.includes(","));
+            const pings = lines.map(line => {
+                const parts = line.split(",");
+                return {
+                    timestamp: parseInt(parts[0], 10),
+                    latency: parseFloat(parts[1])
+                };
+            });
+            const count = pings.length;
+            const avg = count > 0 ? pings.reduce((sum, p) => sum + p.latency, 0) / count : 0;
+            const min = count > 0 ? Math.min(...pings.map(p => p.latency)) : 0;
+            const max = count > 0 ? Math.max(...pings.map(p => p.latency)) : 0;
+            return { count, avg, min, max, pings };
+        } catch (error) {
+            return { count: 0, avg: 0, min: 0, max: 0, pings: [] };
+        }
+    },
+    onTestPong(callback) {
+        const listener = (_event, pong) => callback(pong.id, pong.timestamp);
+        ipcRenderer.on("c4-test-pong", listener);
+        return () => ipcRenderer.removeListener("c4-test-pong", listener);
     }
 });

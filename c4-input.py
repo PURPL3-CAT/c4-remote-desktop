@@ -74,7 +74,7 @@ pressed_buttons = set()
 
 mouse_acc = {"dx": 0, "dy": 0, "last": time.perf_counter()}
 wheel_acc = {"delta": 0, "last": time.perf_counter()}
-ACCUM = 0.008
+ACCUM = 0.0  # No accumulation delay — flush input immediately for maximum responsiveness
 
 
 def report_error(error):
@@ -217,8 +217,7 @@ def handle(e):
             return
         mouse_acc["dx"] = max(-10_000, min(10_000, mouse_acc["dx"] + int(max(-10_000, min(10_000, dx)))))
         mouse_acc["dy"] = max(-10_000, min(10_000, mouse_acc["dy"] + int(max(-10_000, min(10_000, dy)))))
-        if now - mouse_acc["last"] >= ACCUM:
-            flush_mouse()
+        flush_mouse()
         return
 
     if kind == "wheel":
@@ -228,8 +227,7 @@ def handle(e):
             return
         wheel_acc["delta"] += wheel_delta_to_clicks(raw, mode)
         wheel_acc["delta"] = max(-300, min(300, wheel_acc["delta"]))
-        if now - wheel_acc["last"] >= ACCUM:
-            flush_wheel()
+        flush_wheel()
         return
 
     try:
